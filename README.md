@@ -1,18 +1,31 @@
-# ESP32 OBD Bridge (MCP2515 <-> MCP2518FD)
+# ESP32 BLE ELM327 Dongle via MCP2518FD
 
 ## What this does
-- Receives CAN frames from OBD scanner side on `MCP2515`
-- Forwards those frames to `MCP2518FD`
-- Receives frames on `MCP2518FD`
-- Sends them back to OBD side through `MCP2515`
+- Exposes the ESP32 as a BLE ELM327-style dongle named `ESP32-ELM327`
+- Sends OBD-II CAN requests to the vehicle through `MCP2518FD`
+- Returns ECU replies back to the BLE client in ELM327-style text format
+- Removes the old `MCP2515 <-> MCP2518FD` bridge design
 
-Driver usage style follows Battery-Emulator project:
-- `ACAN2515` with `ACAN2515Settings`
-- `ACAN2517FD` with `ACAN2517FDSettings`
-- ISR lambda style: `[] { canX.isr(); }`
+## Current scope
+- `MCP2518FD` is the only vehicle CAN interface
+- Uses a BLE UART-style service for app communication
+- Supports a minimal set of ELM327 `AT` commands:
+  - `ATZ`, `ATI`, `ATD`
+  - `ATE0/1`, `ATL0/1`, `ATS0/1`, `ATH0/1`
+  - `ATCAF0/1`, `ATSP0`, `ATSP6`, `ATSP7`, `ATDP`, `ATDPN`, `ATSH`, `ATPC`
+- Supports single-frame OBD hex requests such as:
+  - `0100`
+  - `010C`
+  - `010D`
+- Waits for single-frame ECU replies on standard OBD response IDs `0x7E8` to `0x7EF`
+
+## Current limitations
+- No ISO-TP multi-frame support yet
+- No automatic protocol detection beyond simple 11-bit / 29-bit mode switching
+- No ISO-TP multi-frame BLE packet reassembly beyond simple line buffering
+- Header filtering is still minimal and tuned for standard OBD polling
 
 ## Default pins (ESP32 DevKit)
-- MCP2515: `SCK=22`, `MOSI=21`, `MISO=19`, `CS=18`, `INT=23`
 - MCP2518FD: `SCK=33`, `MOSI(SDI)=32`, `MISO(SDO)=35`, `CS=25`, `INT=34`
 
 ## Build / upload
@@ -23,5 +36,8 @@ pio device monitor -b 115200
 ```
 
 ## Notes
-- Bitrate defaults to `500 kbps` on both controllers.
-- MCP2515 is classic CAN only; incoming CAN-FD frames from MCP2518FD are dropped.
+- CAN arbitration bitrate defaults to `500 kbps`
+- BLE device name defaults to `ESP32-ELM327`
+- The firmware currently targets common OBD polling apps that talk to ELM327-style serial adapters
+- BLE transport currently uses Nordic UART Service UUIDs
+- The next major improvement should be ISO-TP multi-frame request/response handling for longer OBD replies
