@@ -39,5 +39,6 @@ pio device monitor -b 115200
 - CAN arbitration bitrate defaults to `500 kbps`
 - BLE device name defaults to `ESP32-ELM327`
 - The firmware currently targets common OBD polling apps that talk to ELM327-style serial adapters
+- In the OBD scanner app, choose a connection mode that scans for `BLE` devices; do not expect the dongle to appear as classic Bluetooth
 - BLE transport currently uses Nordic UART Service UUIDs
 - The next major improvement should be ISO-TP multi-frame request/response handling for longer OBD replies
