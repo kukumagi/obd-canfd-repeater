@@ -1,0 +1,9 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "C:\\Users\\LENOVO-T460\\.platformio\\penv\\Scripts\\platformio.exe": true,
+        "/^cmd\\.exe /c \"C:\\\\Users\\\\LENOVO-T460\\\\\\.platformio\\\\penv\\\\Scripts\\\\platformio\\.exe run\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

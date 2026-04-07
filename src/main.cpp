@@ -129,10 +129,49 @@ static void writeElmInlinePrompt() {
 
 static void writeElmResponse(const String& value) {
   if (elm.lineFeeds) {
-    writeBlePayload(value + "\r\n");
+    if (value.indexOf('\r') < 0) {
+      writeBlePayload(value + "\r\n");
+    } else {
+      size_t start = 0;
+      while (start < value.length()) {
+        const int end = value.indexOf('\r', start);
+        const String line = (end < 0)
+            ? value.substring(start)
+            : value.substring(start, static_cast<size_t>(end));
+
+        if (!line.isEmpty()) {
+          writeBlePayload(line + "\r\n");
+        }
+
+        if (end < 0) {
+          break;
+        }
+        start = static_cast<size_t>(end) + 1;
+      }
+    }
   } else {
-    writeBlePayload(value + "\r");
+    if (value.indexOf('\r') < 0) {
+      writeBlePayload(value + "\r");
+    } else {
+      size_t start = 0;
+      while (start < value.length()) {
+        const int end = value.indexOf('\r', start);
+        const String line = (end < 0)
+            ? value.substring(start)
+            : value.substring(start, static_cast<size_t>(end));
+
+        if (!line.isEmpty()) {
+          writeBlePayload(line + "\r");
+        }
+
+        if (end < 0) {
+          break;
+        }
+        start = static_cast<size_t>(end) + 1;
+      }
+    }
   }
+
   delay(getElmPromptDelayMs());
   writeElmInlinePrompt();
 }
@@ -257,7 +296,7 @@ static bool initCanController() {
 static void resetElmState() {
   elm.echo = false;
   elm.lineFeeds = false;
-  elm.spaces = true;
+  elm.spaces = false;
   elm.headers = false;
   elm.canAutoFormatting = true;
   elm.allowLongMessages = false;
@@ -433,9 +472,7 @@ static String formatObdPayload(const CANFDMessage& response) {
   String output;
   if (elm.headers) {
     output += formatHexId(response.id, response.ext);
-    if (elm.spaces) {
-      output += ' ';
-    }
+    output += ' ';
 
     // With CAN headers enabled, ELM-compatible adapters include the full
     // single-frame payload, including the leading PCI length byte.
@@ -724,6 +761,7 @@ static bool transactObdRequest(const String& command) {
   CANFDMessage response;
   uint8_t isoTpPayload[512];
   String isoTpHeaderFrames;
+  String isoTpFrameData;
 
   while (static_cast<int32_t>(millis() - responseDeadline) < 0) {
     can2518.poll();
@@ -757,7 +795,7 @@ static bool transactObdRequest(const String& command) {
         return true;
       }
 
-      const size_t totalPayloadLength =
+      size_t totalPayloadLength =
           (static_cast<size_t>(response.data[0] & 0x0F) << 8) |
           static_cast<size_t>(response.data[1]);
       if (totalPayloadLength == 0 || totalPayloadLength > sizeof(isoTpPayload)) {
@@ -769,8 +807,30 @@ static bool transactObdRequest(const String& command) {
           totalPayloadLength,
           static_cast<size_t>(response.len - 2));
       memcpy(isoTpPayload, &response.data[2], receivedPayloadLength);
+      bool strippedUdsHeader = false;
+      if (!elm.headers && receivedPayloadLength >= 3 && isoTpPayload[0] == 0x62) {
+        // Strip UDS response header: 0x62 + 2-byte DID
+        totalPayloadLength -= 3;
+        receivedPayloadLength -= 3;
+        memmove(isoTpPayload, &isoTpPayload[3], receivedPayloadLength);
+        strippedUdsHeader = true;
+      }
       if (elm.headers) {
         isoTpHeaderFrames = formatElmFrameWithHeader(response);
+      } else {
+        if (strippedUdsHeader) {
+          isoTpFrameData = formatIsoTpPayload(
+              response.id,
+              response.ext,
+              &response.data[5],
+              response.len - 5);
+        } else {
+          isoTpFrameData = formatIsoTpPayload(
+              response.id,
+              response.ext,
+              &response.data[2],
+              response.len - 2);
+        }
       }
 
       if (!sendIsoTpFlowControl(request, response)) {
@@ -825,6 +885,13 @@ static bool transactObdRequest(const String& command) {
         if (elm.headers) {
           isoTpHeaderFrames += '\r';
           isoTpHeaderFrames += formatElmFrameWithHeader(consecutiveFrame);
+        } else {
+          isoTpFrameData += '\r';
+          isoTpFrameData += formatIsoTpPayload(
+              response.id,
+              response.ext,
+              &consecutiveFrame.data[1],
+              consecutiveFrame.len - 1);
         }
         responseDeadline = millis() + timeoutMs;
         expectedSequence = static_cast<uint8_t>((expectedSequence + 1U) & 0x0F);
@@ -837,11 +904,7 @@ static bool transactObdRequest(const String& command) {
 
       const String payload = elm.headers
           ? isoTpHeaderFrames
-          : formatIsoTpPayload(
-                response.id,
-                response.ext,
-                isoTpPayload,
-                receivedPayloadLength);
+          : isoTpFrameData;
       if (payload.isEmpty()) {
         writeElmNoData();
         return true;
@@ -941,12 +1004,14 @@ static bool handleAtCommand(const String& command) {
 
   if (command == "ATH0") {
     elm.headers = false;
+    elm.spaces = false;
     writeElmOk();
     return true;
   }
 
   if (command == "ATH1") {
     elm.headers = true;
+    elm.spaces = true;
     writeElmOk();
     return true;
   }
