@@ -6,6 +6,8 @@
 #include <BLE2902.h>
 #include <ACAN2517FD.h>
 
+// todo: fix uds messages not reaching car scanner app.
+
 static constexpr uint8_t MCP2518_SCK = 33;
 static constexpr uint8_t MCP2518_MOSI = 32;
 static constexpr uint8_t MCP2518_MISO = 35;
@@ -292,6 +294,65 @@ static bool isExpectedResponseId(const CANFDMessage& request, const CANFDMessage
   return response.id != request.id;
 }
 
+static bool doesResponseMatchRequest(
+    const CANFDMessage& request,
+    const CANFDMessage& response) {
+  if (response.len == 0) {
+    return false;
+  }
+
+  const uint8_t pciType = response.data[0] >> 4;
+  uint8_t payloadOffset = 1;
+  uint8_t payloadLength = 0;
+
+  if (pciType == 0x0U) {
+    payloadLength = response.data[0] & 0x0F;
+    payloadOffset = 1;
+  } else if (pciType == 0x1U) {
+    payloadLength = response.len >= 2 ? static_cast<uint8_t>(response.len - 2) : 0;
+    payloadOffset = 2;
+  } else {
+    return false;
+  }
+
+  if (payloadLength == 0 || response.len < payloadOffset + 1) {
+    return false;
+  }
+
+  const uint8_t requestService = request.data[1];
+  const uint8_t responseService = response.data[payloadOffset];
+
+  if (responseService == 0x7F) {
+    return payloadLength >= 2 &&
+           response.len >= payloadOffset + 2 &&
+           response.data[payloadOffset + 1] == requestService;
+  }
+
+  if (responseService != static_cast<uint8_t>(requestService + 0x40U)) {
+    return false;
+  }
+
+  if (request.data[0] >= 2) {
+    if (payloadLength < 2 || response.len < payloadOffset + 2) {
+      return false;
+    }
+    if (response.data[payloadOffset + 1] != request.data[2]) {
+      return false;
+    }
+  }
+
+  if (request.data[0] >= 3) {
+    if (payloadLength < 3 || response.len < payloadOffset + 3) {
+      return false;
+    }
+    if (response.data[payloadOffset + 2] != request.data[3]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 static bool buildObdRequest(const String& command, CANFDMessage& request) {
   if ((command.length() % 2) != 0 || command.length() < 2 || command.length() > 14) {
     return false;
@@ -320,6 +381,43 @@ static bool buildObdRequest(const String& command, CANFDMessage& request) {
   }
 
   return true;
+}
+
+static uint32_t getIsoTpFlowControlId(
+    const CANFDMessage& request,
+    const CANFDMessage& firstFrame) {
+  if (request.ext != firstFrame.ext) {
+    return request.id;
+  }
+
+  if (!request.ext) {
+    if (request.id == OBD_REQUEST_ID &&
+        firstFrame.id >= 0x7E8 && firstFrame.id <= 0x7EF) {
+      return firstFrame.id - 0x08U;
+    }
+    return request.id;
+  }
+
+  return request.id;
+}
+
+static bool sendIsoTpFlowControl(
+    const CANFDMessage& request,
+    const CANFDMessage& firstFrame) {
+  CANFDMessage flowControl;
+  flowControl.id = getIsoTpFlowControlId(request, firstFrame);
+  flowControl.ext = request.ext;
+  flowControl.len = 8;
+  flowControl.idx = 0;
+  flowControl.type = CANFDMessage::CAN_DATA;
+  flowControl.data[0] = 0x30;
+
+  for (uint8_t i = 1; i < flowControl.len; i++) {
+    flowControl.data[i] = 0x00;
+  }
+
+  logLine("TX MCP2518FD: " + formatCanFrameForLog(flowControl));
+  return can2518.tryToSend(flowControl);
 }
 
 static String formatObdPayload(const CANFDMessage& response) {
@@ -360,7 +458,54 @@ static String formatObdPayload(const CANFDMessage& response) {
   return output;
 }
 
+static String formatElmFrameWithHeader(const CANFDMessage& frame) {
+  String output = formatHexId(frame.id, frame.ext);
+  if (elm.spaces) {
+    output += ' ';
+  }
+
+  for (uint8_t i = 0; i < frame.len; i++) {
+    output += formatHexByte(frame.data[i]);
+    if (elm.spaces && (i + 1) != frame.len) {
+      output += ' ';
+    }
+  }
+
+  return output;
+}
+
+static String formatIsoTpPayload(
+    const uint32_t responseId,
+    const bool extended,
+    const uint8_t* payload,
+    const size_t payloadLength) {
+  if (payload == nullptr || payloadLength == 0) {
+    return "";
+  }
+
+  String output;
+  if (elm.headers) {
+    output += formatHexId(responseId, extended);
+    if (elm.spaces) {
+      output += ' ';
+    }
+  }
+
+  for (size_t i = 0; i < payloadLength; i++) {
+    output += formatHexByte(payload[i]);
+    if (elm.spaces && (i + 1) != payloadLength) {
+      output += ' ';
+    }
+  }
+
+  return output;
+}
+
 static void logReceivedCanFrame(const CANFDMessage& response) {
+  if (!response.ext && (response.id < 0x7E0U || response.id > 0x7EFU)) {
+    return;
+  }
+
   logLine("RX MCP2518FD: " + formatCanFrameForLog(response));
 }
 
@@ -575,10 +720,12 @@ static bool transactObdRequest(const String& command) {
   }
 
   const uint32_t timeoutMs = static_cast<uint32_t>(elm.timeoutUnits) * 4U;
-  const uint32_t startedAt = millis();
+  uint32_t responseDeadline = millis() + timeoutMs;
   CANFDMessage response;
+  uint8_t isoTpPayload[512];
+  String isoTpHeaderFrames;
 
-  while (millis() - startedAt < timeoutMs) {
+  while (static_cast<int32_t>(millis() - responseDeadline) < 0) {
     can2518.poll();
 
     if (!can2518.available()) {
@@ -594,6 +741,115 @@ static bool transactObdRequest(const String& command) {
 
     if (!isExpectedResponseId(request, response)) {
       continue;
+    }
+
+    const uint8_t pciType = response.data[0] >> 4;
+    if ((pciType == 0x0U || pciType == 0x1U) &&
+        !doesResponseMatchRequest(request, response)) {
+      continue;
+    }
+
+    responseDeadline = millis() + timeoutMs;
+
+    if (pciType == 0x1U) {
+      if (response.len < 3) {
+        writeElmNoData();
+        return true;
+      }
+
+      const size_t totalPayloadLength =
+          (static_cast<size_t>(response.data[0] & 0x0F) << 8) |
+          static_cast<size_t>(response.data[1]);
+      if (totalPayloadLength == 0 || totalPayloadLength > sizeof(isoTpPayload)) {
+        writeElmNoData();
+        return true;
+      }
+
+      size_t receivedPayloadLength = min(
+          totalPayloadLength,
+          static_cast<size_t>(response.len - 2));
+      memcpy(isoTpPayload, &response.data[2], receivedPayloadLength);
+      if (elm.headers) {
+        isoTpHeaderFrames = formatElmFrameWithHeader(response);
+      }
+
+      if (!sendIsoTpFlowControl(request, response)) {
+        writeElmResponse("BUFFER FULL");
+        return true;
+      }
+
+      uint8_t expectedSequence = 1;
+      while (receivedPayloadLength < totalPayloadLength &&
+             static_cast<int32_t>(millis() - responseDeadline) < 0) {
+        can2518.poll();
+
+        if (!can2518.available()) {
+          delay(2);
+          continue;
+        }
+
+        CANFDMessage consecutiveFrame;
+        if (!can2518.receive(consecutiveFrame)) {
+          continue;
+        }
+
+        logReceivedCanFrame(consecutiveFrame);
+
+        if (!isExpectedResponseId(request, consecutiveFrame)) {
+          continue;
+        }
+
+        if (consecutiveFrame.len < 2) {
+          continue;
+        }
+
+        const uint8_t consecutivePciType = consecutiveFrame.data[0] >> 4;
+        if (consecutivePciType != 0x2U) {
+          continue;
+        }
+
+        const uint8_t sequenceNumber = consecutiveFrame.data[0] & 0x0F;
+        if (sequenceNumber != expectedSequence) {
+          writeElmNoData();
+          return true;
+        }
+
+        const size_t bytesRemaining = totalPayloadLength - receivedPayloadLength;
+        const size_t bytesAvailable = consecutiveFrame.len - 1;
+        const size_t bytesToCopy = min(bytesRemaining, bytesAvailable);
+        memcpy(
+            &isoTpPayload[receivedPayloadLength],
+            &consecutiveFrame.data[1],
+            bytesToCopy);
+        receivedPayloadLength += bytesToCopy;
+        if (elm.headers) {
+          isoTpHeaderFrames += '\r';
+          isoTpHeaderFrames += formatElmFrameWithHeader(consecutiveFrame);
+        }
+        responseDeadline = millis() + timeoutMs;
+        expectedSequence = static_cast<uint8_t>((expectedSequence + 1U) & 0x0F);
+      }
+
+      if (receivedPayloadLength != totalPayloadLength) {
+        writeElmNoData();
+        return true;
+      }
+
+      const String payload = elm.headers
+          ? isoTpHeaderFrames
+          : formatIsoTpPayload(
+                response.id,
+                response.ext,
+                isoTpPayload,
+                receivedPayloadLength);
+      if (payload.isEmpty()) {
+        writeElmNoData();
+        return true;
+      }
+
+      logLine("OBD " + command + " -> " + payload);
+      writeElmResponse(payload);
+      return true;
     }
 
     const String payload = formatObdPayload(response);

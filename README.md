@@ -17,12 +17,12 @@
   - `0100`
   - `010C`
   - `010D`
-- Waits for single-frame ECU replies on standard OBD response IDs `0x7E8` to `0x7EF`
+- Waits for ECU replies on standard OBD response IDs `0x7E8` to `0x7EF`
+- Reassembles ISO-TP multi-frame ECU responses before returning them to the BLE client
 
 ## Current limitations
-- No ISO-TP multi-frame support yet
 - No automatic protocol detection beyond simple 11-bit / 29-bit mode switching
-- No ISO-TP multi-frame BLE packet reassembly beyond simple line buffering
+- No ISO-TP multi-frame request transmit support yet
 - Header filtering is still minimal and tuned for standard OBD polling
 
 ## Default pins (ESP32 DevKit)
@@ -41,4 +41,4 @@ pio device monitor -b 115200
 - The firmware currently targets common OBD polling apps that talk to ELM327-style serial adapters
 - In the OBD scanner app, choose a connection mode that scans for `BLE` devices; do not expect the dongle to appear as classic Bluetooth
 - BLE transport currently uses Nordic UART Service UUIDs
-- The next major improvement should be ISO-TP multi-frame request/response handling for longer OBD replies
+- The next major improvement should be ISO-TP multi-frame request transmit support for longer tester commands
