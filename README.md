@@ -1,4 +1,6 @@
-# ESP32 BLE ELM327 Dongle via MCP2518FD
+# ESP32 CANFD OBD BLE Scanner
+
+> Work in progress. CANbus data currently does not reach the app correctly; BLE transport and app integration remain under development.
 
 ## What this does
 - Exposes the ESP32 as a BLE ELM327-style dongle named `ESP32-ELM327`

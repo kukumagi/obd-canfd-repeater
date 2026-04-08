@@ -81,21 +81,27 @@ static String visualizeControlChars(const String& value) {
 }
 
 static void writeBlePayload(const String& value) {
-  Serial.print("BLE TX: ");
+  Serial.print("BLE TX [headers=");
+  Serial.print(elm.headers ? "1" : "0");
+  Serial.print(" spaces=");
+  Serial.print(elm.spaces ? "1" : "0");
+  Serial.print(" lineFeeds=");
+  Serial.print(elm.lineFeeds ? "1" : "0");
+  Serial.print("] : ");
   Serial.println(visualizeControlChars(value));
 
   if (!bleClientConnected || bleTxCharacteristic == nullptr || value.isEmpty()) {
     return;
   }
 
-  const size_t maxChunkSize = 180;
+  const size_t maxChunkSize = 20;
   for (size_t offset = 0; offset < value.length(); offset += maxChunkSize) {
     const String chunk = value.substring(offset, offset + maxChunkSize);
     bleTxCharacteristic->setValue(
         reinterpret_cast<const uint8_t*>(chunk.c_str()),
         chunk.length());
     bleTxCharacteristic->notify();
-    delay(10);
+    delay(50);
   }
 }
 
@@ -124,56 +130,13 @@ static void writeElmPrompt() {
 }
 
 static void writeElmInlinePrompt() {
-  writeBlePayload(">");
+  writeBlePayload(elm.lineFeeds ? "\r\n>" : "\r>");
 }
 
 static void writeElmResponse(const String& value) {
-  if (elm.lineFeeds) {
-    if (value.indexOf('\r') < 0) {
-      writeBlePayload(value + "\r\n");
-    } else {
-      size_t start = 0;
-      while (start < value.length()) {
-        const int end = value.indexOf('\r', start);
-        const String line = (end < 0)
-            ? value.substring(start)
-            : value.substring(start, static_cast<size_t>(end));
-
-        if (!line.isEmpty()) {
-          writeBlePayload(line + "\r\n");
-        }
-
-        if (end < 0) {
-          break;
-        }
-        start = static_cast<size_t>(end) + 1;
-      }
-    }
-  } else {
-    if (value.indexOf('\r') < 0) {
-      writeBlePayload(value + "\r");
-    } else {
-      size_t start = 0;
-      while (start < value.length()) {
-        const int end = value.indexOf('\r', start);
-        const String line = (end < 0)
-            ? value.substring(start)
-            : value.substring(start, static_cast<size_t>(end));
-
-        if (!line.isEmpty()) {
-          writeBlePayload(line + "\r");
-        }
-
-        if (end < 0) {
-          break;
-        }
-        start = static_cast<size_t>(end) + 1;
-      }
-    }
-  }
-
-  delay(getElmPromptDelayMs());
-  writeElmInlinePrompt();
+  String response = value;
+  response += elm.lineFeeds ? "\r\n>" : "\r>";
+  writeBlePayload(response);
 }
 
 static void writeElmOk() {
@@ -296,7 +259,7 @@ static bool initCanController() {
 static void resetElmState() {
   elm.echo = false;
   elm.lineFeeds = false;
-  elm.spaces = false;
+  elm.spaces = true;
   elm.headers = false;
   elm.canAutoFormatting = true;
   elm.allowLongMessages = false;
@@ -726,6 +689,160 @@ static bool buildSyntheticResponse(const CANFDMessage& request, CANFDMessage& re
   return false;
 }
 
+static bool buildSyntheticIsoTpResponse(const CANFDMessage& request, String& payload) {
+  if (request.ext || request.id != 0x7E4 || request.len < 4) {
+    return false;
+  }
+
+  if (request.data[1] != 0x22 || request.data[2] != 0x01) {
+    return false;
+  }
+
+  const uint8_t did = request.data[3];
+  const uint8_t (*frames)[8] = nullptr;
+  size_t frameCount = 0;
+
+  static const uint8_t frames_220101[][8] = {
+      {0x10, 0x3E, 0x62, 0x01, 0x01, 0xEF, 0xFB, 0xE7},
+      {0x21, 0xEF, 0x8E, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0x22, 0x00, 0x01, 0xBA, 0xF0, 0xE, 0x0B, 0x0C},
+      {0x23, 0x0D, 0x0D, 0x0D, 0x0D, 0x00, 0x7F, 0xC6},
+      {0x24, 0xAC, 0xC3, 0xA2, 0x00, 0x00, 0x78, 0x00},
+      {0x25, 0x01, 0x11, 0xE9, 0x00, 0x01, 0x0D, 0x11},
+      {0x26, 0x00, 0x00, 0xBF, 0xF0, 0x00, 0x00, 0xB5},
+      {0x27, 0x33, 0x00, 0x5F, 0xC7, 0x77, 0x00, 0x19},
+      {0x28, 0x99, 0x7F, 0xFF, 0x00, 0x00, 0x0B, 0xB8}
+  };
+
+  static const uint8_t frames_220102[][8] = {
+      {0x10, 0x22, 0x62, 0x01, 0x02, 0xFF, 0xFF, 0xFF},
+      {0x21, 0xFF, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x22, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x23, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x24, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x25, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xAA, 0xAA}
+  };
+
+  static const uint8_t frames_220103[][8] = {
+      {0x10, 0x27, 0x62, 0x01, 0x03, 0xFF, 0xFF, 0xFF},
+      {0x21, 0xFF, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x22, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x23, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x24, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x25, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xAA, 0xAA}
+  };
+
+  static const uint8_t frames_220104[][8] = {
+      {0x10, 0x27, 0x62, 0x01, 0x04, 0xFF, 0xFF, 0xFF},
+      {0x21, 0xFF, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x22, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x23, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x24, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x25, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xAA, 0xAA}
+  };
+
+  static const uint8_t frames_220105[][8] = {
+      {0x10, 0x2E, 0x62, 0x01, 0x05, 0xFF, 0xFB, 0x74},
+      {0x21, 0x0F, 0x01, 0x2C, 0x01, 0x01, 0x2C, 0x0D},
+      {0x22, 0x0C, 0x0C, 0x0B, 0x0C, 0x0C, 0x0D, 0x57},
+      {0x23, 0xED, 0x62, 0xD4, 0x02, 0x00, 0x64, 0xEF},
+      {0x24, 0x00, 0x03, 0xE6, 0x85, 0x59, 0xA6, 0x00},
+      {0x25, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0x26, 0x00, 0xC0, 0xE0, 0xD0, 0xDA, 0xAA, 0xAA}
+  };
+
+  static const uint8_t frames_22010A[][8] = {
+      {0x10, 0x22, 0x62, 0x01, 0x0A, 0xFF, 0xFF, 0xFF},
+      {0x21, 0xFF, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x22, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x23, 0xC4, 0xC4, 0xC4, 0xC4, 0xC5, 0xC5, 0xC4},
+      {0x24, 0xC5, 0xC4, 0xC5, 0xC4, 0xC4, 0xC4, 0xAA}
+  };
+
+  static const uint8_t frames_22010B[][8] = {
+      {0x10, 0x22, 0x62, 0x01, 0x0B, 0xFF, 0xFF, 0xFF},
+      {0x21, 0xFF, 0xC5, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x22, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x23, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x24, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4, 0xC4},
+      {0x25, 0xC4, 0xC3, 0xC3, 0xC3, 0xC3, 0xAA, 0xAA}
+  };
+
+  static const uint8_t frames_22010C[][8] = {
+      {0x10, 0x27, 0x62, 0x01, 0x0C, 0xFF, 0xFF, 0xF0},
+      {0x21, 0x00, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3},
+      {0x22, 0xC3, 0xC3, 0xC5, 0xC5, 0xC6, 0xC6, 0xC6},
+      {0x23, 0xC5, 0xC6, 0xC6, 0xC6, 0xC6, 0xC5, 0xC6},
+      {0x24, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00},
+      {0x25, 0x01, 0x00, 0x0E, 0x0E, 0x01, 0xAA, 0xAA}
+  };
+
+  switch (did) {
+    case 0x01:
+      frames = frames_220101;
+      frameCount = sizeof(frames_220101) / sizeof(frames_220101[0]);
+      break;
+    case 0x02:
+      frames = frames_220102;
+      frameCount = sizeof(frames_220102) / sizeof(frames_220102[0]);
+      break;
+    case 0x03:
+      frames = frames_220103;
+      frameCount = sizeof(frames_220103) / sizeof(frames_220103[0]);
+      break;
+    case 0x04:
+      frames = frames_220104;
+      frameCount = sizeof(frames_220104) / sizeof(frames_220104[0]);
+      break;
+    case 0x05:
+      frames = frames_220105;
+      frameCount = sizeof(frames_220105) / sizeof(frames_220105[0]);
+      break;
+    case 0x0A:
+      frames = frames_22010A;
+      frameCount = sizeof(frames_22010A) / sizeof(frames_22010A[0]);
+      break;
+    case 0x0B:
+      frames = frames_22010B;
+      frameCount = sizeof(frames_22010B) / sizeof(frames_22010B[0]);
+      break;
+    case 0x0C:
+      frames = frames_22010C;
+      frameCount = sizeof(frames_22010C) / sizeof(frames_22010C[0]);
+      break;
+    default:
+      return false;
+  }
+
+  for (size_t index = 0; index < frameCount; ++index) {
+    CANFDMessage response;
+    response.id = 0x7EC;
+    response.ext = false;
+    response.idx = 0;
+    response.type = CANFDMessage::CAN_DATA;
+    response.len = 8;
+    memcpy(response.data, frames[index], 8);
+
+    logLine("RX MCP2518FD: " + formatCanFrameForLog(response));
+
+    if (index > 0) {
+      payload += elm.lineFeeds ? "\r\n" : "\r";
+    }
+
+    if (elm.headers) {
+      payload += formatElmFrameWithHeader(response);
+    } else {
+      if (index == 0) {
+        payload += formatIsoTpPayload(response.id, response.ext, &response.data[2], response.len - 2);
+      } else {
+        payload += formatIsoTpPayload(response.id, response.ext, &response.data[1], response.len - 1);
+      }
+    }
+  }
+
+  return !payload.isEmpty();
+}
+
 static bool transactObdRequest(const String& command) {
   CANFDMessage request;
   if (!buildObdRequest(command, request)) {
@@ -744,6 +861,12 @@ static bool transactObdRequest(const String& command) {
   logLine("TX MCP2518FD: " + formatCanFrameForLog(request));
 
   if (!can2518.tryToSend(request)) {
+    String syntheticPayload;
+    if (buildSyntheticIsoTpResponse(request, syntheticPayload)) {
+      writeElmResponse(syntheticPayload);
+      return true;
+    }
+
     if (buildSyntheticResponse(request, syntheticResponse)) {
       logLine("Synthetic ECU reply: " + formatCanFrameForLog(syntheticResponse));
       const String payload = formatObdPayload(syntheticResponse);
@@ -883,10 +1006,10 @@ static bool transactObdRequest(const String& command) {
             bytesToCopy);
         receivedPayloadLength += bytesToCopy;
         if (elm.headers) {
-          isoTpHeaderFrames += '\r';
+          isoTpHeaderFrames += elm.lineFeeds ? "\r\n" : "\r";
           isoTpHeaderFrames += formatElmFrameWithHeader(consecutiveFrame);
         } else {
-          isoTpFrameData += '\r';
+          isoTpFrameData += elm.lineFeeds ? "\r\n" : "\r";
           isoTpFrameData += formatIsoTpPayload(
               response.id,
               response.ext,
@@ -923,6 +1046,12 @@ static bool transactObdRequest(const String& command) {
 
     logLine("OBD " + command + " -> " + payload);
     writeElmResponse(payload);
+    return true;
+  }
+
+  String syntheticPayload;
+  if (buildSyntheticIsoTpResponse(request, syntheticPayload)) {
+    writeElmResponse(syntheticPayload);
     return true;
   }
 

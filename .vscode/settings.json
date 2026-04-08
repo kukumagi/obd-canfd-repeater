@@ -4,6 +4,10 @@
         "/^cmd\\.exe /c \"C:\\\\Users\\\\LENOVO-T460\\\\\\.platformio\\\\penv\\\\Scripts\\\\platformio\\.exe run\"$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^cd c:\\\\Users\\\\LENOVO-T460\\\\canfd-obd-scanner ; python -c 'from pathlib import Path; path=Path\\(\"logs/device-monitor-260407-153033\\.log\"\\); lines=path\\.read_text\\(\\)\\.splitlines\\(\\); cmds=\\[\"220101\",\"220102\",\"220103\",\"220104\",\"220105\",\"22010A\",\"22010B\",\"22010C\"\\]; \nfor cmd in cmds:\n    print\\(\"COMMAND\",cmd\\)\n    for i,line in enumerate\\(lines\\):\n        if f\"OBD \\{cmd\\} ->\" in line:\n            print\\(\"BLOCK start\", i\\+1, line\\)\n            for j in range\\(i\\+1, min\\(i\\+15, len\\(lines\\)\\)\\):\n                if lines\\[j\\]\\.startswith\\(\"15:\"\\):\n                    break\n                print\\(lines\\[j\\]\\)\n            print\\(\"---\"\\)\n            break'$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }
