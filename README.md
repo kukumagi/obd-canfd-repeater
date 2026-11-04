@@ -1,15 +1,16 @@
 # ESP32 CANFD OBD BLE Scanner
 
-> Work in progress. CANbus data currently does not reach the app correctly; BLE transport and app integration remain under development.
+> Replay mode is enabled by default to serve saved battery responses without an MCP2518FD connected.
 
 ## What this does
 - Exposes the ESP32 as a BLE ELM327-style dongle named `ESP32-ELM327`
-- Sends OBD-II CAN requests to the vehicle through `MCP2518FD`
+- Sends OBD-II CAN requests to the vehicle through `MCP2518FD` when CAN transport is enabled
 - Returns ECU replies back to the BLE client in ELM327-style text format
 - Removes the old `MCP2515 <-> MCP2518FD` bridge design
 
 ## Current scope
-- `MCP2518FD` is the only vehicle CAN interface
+- BLE replay mode simulates 180 or 192 cell values for UDS DIDs `0x0102`, `0x0103`, `0x0104`, and `0x010A`-`0x010C`, using the battery definition's four-byte prefix plus 32 one-byte values at 20 mV/count. Each DID group has a distinct voltage band to reveal missing responses. Set `SIMULATED_CELL_COUNT` in `src/main.cpp` to `180` or `192`; unused positions in a 180-cell pack return zero. These are test values, not live battery measurements.
+- Set `CAN_TRANSPORT_ENABLED` in `src/main.cpp` to `true` to use the MCP2518FD
 - Uses a BLE UART-style service for app communication
 - Supports a minimal set of ELM327 `AT` commands:
   - `ATZ`, `ATI`, `ATD`

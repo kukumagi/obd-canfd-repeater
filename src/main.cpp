@@ -22,6 +22,10 @@ static constexpr uint32_t OBD_FUNC_29BIT_ID = 0x18DB33F1;
 static constexpr uint32_t OBD_PHYS_REQ_29BIT_ID = 0x18DA10F1;
 static constexpr uint32_t OBD_RESP_29BIT_ID = 0x18DAF110;
 static constexpr uint32_t RESPONSE_TIMEOUT_MS = 1200UL;
+static constexpr bool CAN_TRANSPORT_ENABLED = false;
+static constexpr uint16_t SIMULATED_CELL_COUNT = 192;  // Set to 180 for a 180-cell pack.
+static_assert(SIMULATED_CELL_COUNT == 180 || SIMULATED_CELL_COUNT == 192,
+              "The KIA E-GMP test profile supports 180 or 192 cells");
 
 static constexpr char BLE_DEVICE_NAME[] = "ESP32-ELM327";
 static constexpr char ELM_IDENTITY[] = "ELM327 v1.5";
@@ -690,7 +694,13 @@ static bool buildSyntheticResponse(const CANFDMessage& request, CANFDMessage& re
 }
 
 static bool buildSyntheticIsoTpResponse(const CANFDMessage& request, String& payload) {
-  if (request.ext || request.id != 0x7E4 || request.len < 4) {
+  if (request.ext || request.len < 4) {
+    return false;
+  }
+
+  const bool supportedRequestId = request.id == OBD_REQUEST_ID ||
+      (request.id >= 0x7E0U && request.id <= 0x7E7U);
+  if (!supportedRequestId) {
     return false;
   }
 
@@ -699,6 +709,87 @@ static bool buildSyntheticIsoTpResponse(const CANFDMessage& request, String& pay
   }
 
   const uint8_t did = request.data[3];
+  const bool isCellVoltageDid = did == 0x02 || did == 0x03 || did == 0x04 ||
+      did == 0x0A || did == 0x0B || did == 0x0C;
+  if (isCellVoltageDid) {
+    // Match the battery definition's intended UDS value layout: four metadata
+    // bytes followed by 32 cell bytes, each scaled by 20 mV.
+    static constexpr size_t CELL_COUNT_PER_DID = 32;
+    static constexpr size_t UDS_HEADER_LENGTH = 3;
+    static constexpr size_t UDS_METADATA_LENGTH = 4;
+    static constexpr size_t UDS_PAYLOAD_LENGTH =
+        UDS_HEADER_LENGTH + UDS_METADATA_LENGTH + CELL_COUNT_PER_DID;
+    uint8_t udsPayload[UDS_PAYLOAD_LENGTH] = {0x62, 0x01, did, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    const uint16_t groupOffset = did == 0x02 ? 0 : did == 0x03 ? 32 : did == 0x04 ? 64 :
+        did == 0x0A ? 96 : did == 0x0B ? 128 : 160;
+    const uint8_t groupIndex = static_cast<uint8_t>(groupOffset / CELL_COUNT_PER_DID);
+    const size_t simulatedInGroup = groupOffset >= SIMULATED_CELL_COUNT
+        ? 0
+        : min(CELL_COUNT_PER_DID, static_cast<size_t>(SIMULATED_CELL_COUNT - groupOffset));
+    logLine("Simulated DID 01" + formatHexByte(did) + " cells " +
+            String(groupOffset + 1) + "-" + String(groupOffset + CELL_COUNT_PER_DID) +
+            " (" + String(simulatedInGroup) + " present)");
+
+    for (size_t i = 0; i < CELL_COUNT_PER_DID; ++i) {
+      const uint16_t cellNumber = groupOffset + i;
+      if (cellNumber >= SIMULATED_CELL_COUNT) {
+        udsPayload[UDS_HEADER_LENGTH + UDS_METADATA_LENGTH + i] = 0;
+        continue;
+      }
+
+      // Group-specific bands reveal missing DID responses; the small repeating
+      // variation distinguishes cells within each 32-cell range.
+      const uint8_t variation = static_cast<uint8_t>((i * 3U + groupIndex) % 5U);
+      udsPayload[UDS_HEADER_LENGTH + UDS_METADATA_LENGTH + i] =
+          static_cast<uint8_t>(183U + groupIndex * 5U + variation);
+    }
+
+    CANFDMessage responseFrames[6] = {};
+    size_t responseFrameCount = 1;
+    for (size_t i = 0; i < 6; ++i) {
+      responseFrames[0].data[i + 2] = udsPayload[i];
+    }
+    responseFrames[0].data[0] = static_cast<uint8_t>(0x10U | ((UDS_PAYLOAD_LENGTH >> 8) & 0x0FU));
+    responseFrames[0].data[1] = static_cast<uint8_t>(UDS_PAYLOAD_LENGTH & 0xFFU);
+    responseFrames[0].id = 0x7EC;
+    responseFrames[0].ext = false;
+    responseFrames[0].len = 8;
+    responseFrames[0].idx = 0;
+    responseFrames[0].type = CANFDMessage::CAN_DATA;
+
+    size_t copied = 6;
+    uint8_t sequence = 1;
+    while (copied < UDS_PAYLOAD_LENGTH) {
+      CANFDMessage& frame = responseFrames[responseFrameCount++];
+      frame.id = 0x7EC;
+      frame.ext = false;
+      frame.len = 8;
+      frame.idx = 0;
+      frame.type = CANFDMessage::CAN_DATA;
+      frame.data[0] = static_cast<uint8_t>(0x20U | sequence);
+      const size_t count = min(UDS_PAYLOAD_LENGTH - copied, static_cast<size_t>(7));
+      memcpy(&frame.data[1], &udsPayload[copied], count);
+      copied += count;
+      sequence = static_cast<uint8_t>((sequence + 1U) & 0x0FU);
+    }
+
+    for (size_t i = 0; i < responseFrameCount; ++i) {
+      CANFDMessage& frame = responseFrames[i];
+      logLine("Simulated UDS cell response: " + formatCanFrameForLog(frame));
+      if (elm.headers) {
+        if (!payload.isEmpty()) {
+          payload += elm.lineFeeds ? "\r\n" : "\r";
+        }
+        payload += formatElmFrameWithHeader(frame);
+      }
+    }
+    if (!elm.headers) {
+      payload = formatIsoTpPayload(0x7EC, false, udsPayload, UDS_PAYLOAD_LENGTH);
+    }
+    return !payload.isEmpty();
+  }
+
   const uint8_t (*frames)[8] = nullptr;
   size_t frameCount = 0;
 
@@ -854,6 +945,25 @@ static bool transactObdRequest(const String& command) {
     logLine("Built-in OBD reply: " + formatCanFrameForLog(syntheticResponse));
     const String payload = formatObdPayload(syntheticResponse);
     writeElmResponse(payload);
+    return true;
+  }
+
+  if (!CAN_TRANSPORT_ENABLED) {
+    String replayPayload;
+    if (buildSyntheticIsoTpResponse(request, replayPayload)) {
+      logLine("Replayed ECU response for " + command + ": " + replayPayload);
+      writeElmResponse(replayPayload);
+      return true;
+    }
+
+    if (buildSyntheticResponse(request, syntheticResponse)) {
+      logLine("Replayed ECU response: " + formatCanFrameForLog(syntheticResponse));
+      writeElmResponse(formatObdPayload(syntheticResponse));
+      return true;
+    }
+
+    logLine("No replay data for " + command);
+    writeElmNoData();
     return true;
   }
 
@@ -1437,7 +1547,7 @@ void setup() {
   resetElmState();
   initBleElmAdapter();
 
-  if (!initCanController()) {
+  if (CAN_TRANSPORT_ENABLED && !initCanController()) {
     Serial.println("CAN init failed, rebooting in 3s");
     delay(3000);
     ESP.restart();
@@ -1445,6 +1555,8 @@ void setup() {
 }
 
 void loop() {
-  can2518.poll();
+  if (CAN_TRANSPORT_ENABLED) {
+    can2518.poll();
+  }
   delay(1);
 }
